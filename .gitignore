@@ -1,55 +1,21 @@
-# ===============================
-# Python cache / compiled files
-# ===============================
+# Python
 __pycache__/
-*.py[cod]
-*$py.class
-
-# ===============================
-# Virtual Environment
-# ===============================
 venv/
-.env/
+.env
 
-# ===============================
-# Model Weights (VERY IMPORTANT)
-# ===============================
-best.pt
+# Model weights / exports (DO NOT COMMIT)
 *.pt
 *.onnx
 *.engine
 
-# ===============================
-# Training / Runtime Outputs
-# ===============================
+# Training artifacts
 runs/
-.gradio/
-logs/
-outputs/
+datasets/
+wandb/
 
-# ===============================
-# OS / Editor files
-# ===============================
+# OS junk
 .DS_Store
 Thumbs.db
 
-# ===============================
-# VS Code
-# ===============================
-.vscode/
-
-# ===============================
-# Jupyter / Notebooks
-# ===============================
-.ipynb_checkpoints/
-
-# ===============================
-# PDFs / Reports (generated)
-# ===============================
-*.pdf
-
-# ===============================
-# Temporary files
-# ===============================
-*.tmp
-*.log
+# Gradio cache
+.gradio/
