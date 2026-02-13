@@ -505,7 +505,7 @@ This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) 
 ```
 MIT License
 
-Copyright (c) 2026 Rituraj Singh
+Copyright (c) 2026 Rituraj Singh Adarsh Raj
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -528,6 +528,7 @@ If you use this project in your research or application, please cite:
 @misc{singh2026guava,
   title={Multi-Disease Detection and Severity Grading in Guava Leaves using Deep Learning},
   author={Singh, Rituraj},
+  author={Raj, Adarsh},
   year={2026},
   publisher={GitHub},
   url={https://github.com/Singhrituraj114/Multi-Disease-Detection-and-Severity-Grading-in-Guava-Leaves-using-Deep-Learning},
