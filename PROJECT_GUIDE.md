@@ -6,6 +6,19 @@
 
 ## TABLE OF CONTENTS
 
+0. [DEEP DIVE — How YOLOv8 Works Inside (Architecture)](#0-deep-dive--how-yolov8-works-inside-architecture)
+   - 0.1 [What is a Pixel? What does the model see?](#01-what-is-a-pixel-what-does-the-model-see)
+   - 0.2 [Convolution (Conv2D) — The Core Operation](#02-convolution-conv2d--the-core-operation)
+   - 0.3 [Feature Maps — What the Model Learns](#03-feature-maps--what-the-model-learns)
+   - 0.4 [Pooling — Making It Smaller and Faster](#04-pooling--making-it-smaller-and-faster)
+   - 0.5 [Batch Normalization and Activation (ReLU)](#05-batch-normalization-and-activation-relu)
+   - 0.6 [YOLOv8 Full Architecture — Backbone, Neck, Head](#06-yolov8-full-architecture--backbone-neck-head)
+   - 0.7 [Backbone — Feature Extraction](#07-backbone--feature-extraction)
+   - 0.8 [Neck (FPN + PAN) — Feature Fusion](#08-neck-fpn--pan--feature-fusion)
+   - 0.9 [Head — Making Predictions](#09-head--making-predictions)
+   - 0.10 [OBB — Oriented Bounding Box Output](#010-obb--oriented-bounding-box-output)
+   - 0.11 [mAP@0.5 and mAP@0.5-0.95 Explained](#011-map05-and-map05-095-explained)
+   - 0.12 [Training Flow — How the Model Learned](#012-training-flow--how-the-model-learned)
 1. [What This Project Does](#1-what-this-project-does)
 2. [Why Guava? Why AI?](#2-why-guava-why-ai)
 3. [How the Project is Structured](#3-how-the-project-is-structured)
@@ -28,6 +41,557 @@
     - 10.4 [Dataset and Training Questions](#104-dataset-and-training-questions)
     - 10.5 [Real-World Use Questions](#105-real-world-use-questions)
     - 10.6 [Harder Questions](#106-harder-questions)
+
+---
+
+## 0. DEEP DIVE — How YOLOv8 Works Inside (Architecture)
+
+> This section explains step by step exactly how our AI model works — from a raw image going in, to a disease box coming out. Read this carefully before your presentation.
+
+---
+
+### 0.1 What is a Pixel? What does the model see?
+
+Before the AI does anything, it needs to understand the image as numbers.
+
+Every image is made of tiny squares called **pixels**. Each pixel has 3 numbers:
+- **R** = how much Red (0–255)
+- **G** = how much Green (0–255)
+- **B** = how much Blue (0–255)
+
+So a 640×640 image = **640 × 640 × 3 = 1,228,800 numbers** fed into the model.
+
+```
+A 640x640 image looks like this to the model:
+
+[ [[R,G,B], [R,G,B], [R,G,B], ... ],   ← row 1, 640 pixels
+  [[R,G,B], [R,G,B], [R,G,B], ... ],   ← row 2
+  ...                                   ← 640 rows total
+]
+
+Shape of input tensor = (1, 3, 640, 640)
+   1     → one image (batch size)
+   3     → 3 color channels (R, G, B)
+  640    → height in pixels
+  640    → width in pixels
+```
+
+---
+
+### 0.2 Convolution (Conv2D) — The Core Operation
+
+Convolution is the most important operation in a CNN. Think of it like a **sliding magnifying glass** that scans the image and picks up patterns.
+
+**How it works:**
+
+```
+IMAGE PATCH (5x5 pixels):        FILTER / KERNEL (3x3):
+┌─────────────────────┐          ┌───────────┐
+│  10  20  30  40  50 │          │  1   0  -1│
+│  60  70  80  90 100 │          │  2   0  -2│
+│ 110 120 130 140 150 │    ──►   │  1   0  -1│
+│ 160 170 180 190 200 │          └───────────┘
+│ 210 220 230 240 250 │
+└─────────────────────┘
+
+The filter slides over every 3x3 patch of the image.
+At each position it does:
+  → Multiply each filter value with the pixel it covers
+  → Add all products together
+  → Write that ONE number as the output
+
+This one number summarises: "Did this filter's pattern exist here?"
+```
+
+**What filters detect:**
+- Early filters → simple edges (horizontal, vertical, diagonal lines)
+- Middle filters → shapes, corners, blobs
+- Deep filters → complex textures like disease spots, veins, colour patches
+
+**Key terms:**
+- **Kernel / Filter** → the small sliding window (e.g., 3×3 or 1×1)
+- **Stride** → how many pixels the filter moves each step (stride=2 means skip every other pixel → output is half the size)
+- **Padding** → adding zeros around the image border so the output stays the same size as the input
+
+```
+Conv2D STEP-BY-STEP:
+
+Input image  → [1, 3, 640, 640]
+
+Apply 32 filters of size 3x3 with stride 2:
+  → Each filter scans the whole image
+  → Each filter produces one output grid (feature map)
+  → 32 filters → 32 feature maps
+
+Output → [1, 32, 320, 320]
+  (size halved because stride=2, but 32 different feature views)
+```
+
+---
+
+### 0.3 Feature Maps — What the Model Learns
+
+Each convolution layer produces **Feature Maps** — grids of numbers that represent what the model noticed at each location.
+
+```
+One feature map = one filter's view of the image.
+
+Layer 1 feature maps (low level):       Layer 5 feature maps (high level):
+┌───────────────────┐                   ┌───────────────────┐
+│  edges detected   │                   │  disease patches  │
+│  (blurry, simple) │                   │  detected here    │
+│                   │                   │  (complex shapes) │
+└───────────────────┘                   └───────────────────┘
+
+As we go deeper, feature maps get:
+  → SMALLER in spatial size (width × height shrink)
+  → MORE in number (more channels = more patterns detected)
+  → RICHER in meaning (simple → complex features)
+```
+
+---
+
+### 0.4 Pooling — Making It Smaller and Faster
+
+After convolution, we often apply **Pooling** to reduce the size of feature maps without losing the most important information.
+
+**Max Pooling (most common):**
+
+```
+2x2 Max Pooling with stride 2:
+
+Input (4x4):         Output (2x2):
+┌──┬──┬──┬──┐        ┌────┬────┐
+│ 1│ 3│ 2│ 4│        │    │    │
+├──┼──┼──┼──┤   →    │  3 │  4 │  ← maximum of each 2x2 block
+│ 5│ 6│ 1│ 2│        │    │    │
+├──┼──┼──┼──┤        ├────┼────┤
+│ 7│ 2│ 9│ 1│        │    │    │
+├──┼──┼──┼──┤   →    │  7 │  9 │  ← maximum of each 2x2 block
+│ 3│ 4│ 0│ 8│        │    │    │
+└──┴──┴──┴──┘        └────┴────┘
+
+Rule: Keep the LARGEST number in each 2x2 window.
+Why? The largest number = strongest feature response = most important signal.
+```
+
+**Why pooling matters:**
+- Reduces computation (smaller grid = fewer calculations)
+- Makes the model tolerant to small shifts (if the disease spot moves slightly, the max value stays the same)
+- YOLOv8 uses stride-2 convolutions instead of classic pooling, but the effect is the same
+
+---
+
+### 0.5 Batch Normalization and Activation (ReLU)
+
+After every Conv2D, two more operations happen:
+
+#### Batch Normalization (BatchNorm)
+- The numbers coming out of a convolution can be very large or very small.
+- BatchNorm re-scales all the numbers to have mean ≈ 0 and range around 1.
+- This makes training stable and faster — without it the model takes too long to learn.
+
+```
+Before BatchNorm:  [0.001, 5000, -3000, 0.02, 800]   ← all over the place
+After  BatchNorm:  [-0.5,   1.2,  -1.1,  -0.4, 0.9]  ← nicely scaled
+```
+
+#### ReLU (Rectified Linear Unit) — Activation Function
+- After BatchNorm, every negative number is set to zero.
+- Positive numbers stay as they are.
+
+```
+ReLU:
+  Input:  [-3, -1, 0, 2, 5, -0.5]
+  Output: [ 0,  0, 0, 2, 5,  0  ]
+
+Why? Negative values mean "this filter did NOT detect its pattern here."
+We don't need negatives. Setting them to 0 keeps only real detections.
+```
+
+> **In YOLOv8 the standard block is called C2f = Conv2D + BatchNorm + SiLU activation**
+> SiLU is slightly smoother than ReLU but works the same way in concept.
+
+---
+
+### 0.6 YOLOv8 Full Architecture — Backbone, Neck, Head
+
+YOLOv8 is split into three parts:
+
+```
+INPUT IMAGE (640×640×3)
+        │
+        ▼
+┌───────────────────────────────────────────────────────────────┐
+│                    BACKBONE                                   │
+│   (extracts features — like building a rich picture summary)  │
+│                                                               │
+│  Stem Conv → C2f × N → C2f × N → C2f × N → C2f × N → SPPF   │
+│  640→320   → 320→160 → 160→80 → 80→40  → 40→20               │
+│                                                               │
+│  Produces 3 feature maps at different scales:                 │
+│    P3 = 80×80  (small diseases — fine details)                │
+│    P4 = 40×40  (medium diseases)                              │
+│    P5 = 20×20  (large diseases — big picture)                 │
+└───────────────────────────────────────────────────────────────┘
+        │
+        ▼
+┌───────────────────────────────────────────────────────────────┐
+│                     NECK (FPN + PAN)                          │
+│   (merges features from all scales together — fusion)         │
+│                                                               │
+│   P5 upsampled → merged with P4  →  merged output            │
+│   P4 upsampled → merged with P3  →  merged output            │
+│   merged P3    → downsampled → merged with P4 → merged output │
+│   merged P4    → downsampled → merged with P5 → merged output │
+└───────────────────────────────────────────────────────────────┘
+        │
+        ▼
+┌───────────────────────────────────────────────────────────────┐
+│                     HEAD                                      │
+│   (makes final predictions — disease label + box coordinates) │
+│                                                               │
+│   For each of 3 scales (P3, P4, P5):                          │
+│     → Predict OBB coordinates (8 corner points of rotated box)│
+│     → Predict class probabilities (Anthracnose? Wilt? etc.)   │
+│     → Predict confidence score (how sure?)                    │
+└───────────────────────────────────────────────────────────────┘
+        │
+        ▼
+  NMS (Non-Max Suppression) → remove duplicate boxes
+        │
+        ▼
+  FINAL OUTPUT: boxes + labels + confidence scores
+```
+
+---
+
+### 0.7 Backbone — Feature Extraction
+
+The backbone is the main "seeing" part of the model. It reads the raw image and extracts features at multiple levels of detail.
+
+```
+RAW IMAGE
+640 × 640 × 3
+     │
+     ▼
+[Stem — Conv2D 3→32, stride 2]
+     Shrinks: 640→320
+     Learns: basic edges and colour patches
+     │
+     ▼
+[C2f Block — 32→64, stride 2]
+     Shrinks: 320→160
+     Learns: simple shapes, spots
+     │
+     ▼
+[C2f Block — 64→128, stride 2]
+     Shrinks: 160→80  ← this is called P3 (small-object scale)
+     Learns: leaf textures, early disease marks
+     │
+     ▼
+[C2f Block — 128→256, stride 2]
+     Shrinks: 80→40   ← this is called P4 (medium-object scale)
+     Learns: disease patch shapes
+     │
+     ▼
+[C2f Block — 256→512, stride 2]
+     Shrinks: 40→20   ← this is called P5 (large-object scale)
+     Learns: full disease regions, overall leaf health
+     │
+     ▼
+[SPPF — Spatial Pyramid Pooling Fast]
+     Applies max pooling at 3 different window sizes (5×5, 9×9, 13×13)
+     Merges all results → captures context at multiple zoom levels
+     Still 20×20 but much richer information
+```
+
+**What is C2f?**
+C2f stands for "Cross Stage Partial with 2 convolutions and feature reuse." It works like this:
+
+```
+C2f block:
+  Input
+    │
+    ├─→ Conv (half channels) ─→ [Bottleneck × N] ─→ output_A
+    │
+    └─→ Conv (half channels) ─────────────────────→ output_B
+    
+  output_A + output_B → Concatenate → Conv → Final output
+
+Why? Splitting and merging forces the model to learn both
+detailed features AND broad features in parallel.
+```
+
+---
+
+### 0.8 Neck (FPN + PAN) — Feature Fusion
+
+After the backbone we have 3 feature maps at different sizes (P3=80×80, P4=40×40, P5=20×20). The problem is:
+
+- P3 has **fine detail** but only sees small regions → good for small spots
+- P5 has **big-picture understanding** but blurry on small details → good for large regions
+
+The **Neck** combines them so every scale benefits from every level of understanding.
+
+**FPN → top-down path (big to small, adding detail):**
+
+```
+P5 (20×20, deep knowledge)
+     │
+     ▼ Upsample 2× → 40×40
+     + P4 (40×40, medium knowledge)
+     ▼
+ Merged P4 (40×40) — now knows both big-picture AND medium details
+     │
+     ▼ Upsample 2× → 80×80
+     + P3 (80×80, fine detail)
+     ▼
+ Merged P3 (80×80) — now has ALL levels of knowledge
+```
+
+**PAN → bottom-up path (small to big, adding location precision):**
+
+```
+Merged P3 (80×80, rich detail)
+     │
+     ▼ Downsample 2× → 40×40
+     + Merged P4
+     ▼
+ Final P4 — sharp + contextual
+     │
+     ▼ Downsample 2× → 20×20
+     + P5
+     ▼
+ Final P5 — sharp + contextual
+```
+
+**After Neck we have 3 refined feature maps:** P3, P4, P5 — each now contains both fine and coarse information. This is why YOLOv8 can detect both tiny disease spots AND large disease regions in the same image.
+
+---
+
+### 0.9 Head — Making Predictions
+
+The Head reads the three feature maps (P3, P4, P5) and makes the final answer.
+
+```
+For each feature map position (every grid cell), the head predicts:
+
+┌──────────────────────────────────────────────────────────┐
+│  CLASS SCORES: probability for each disease              │
+│    [Anthracnose=0.87, Wilt=0.03, Insect=0.02, ...]       │
+│                                                          │
+│  CONFIDENCE: how sure the model is (0 to 1)              │
+│    e.g., 0.91                                            │
+│                                                          │
+│  BOX COORDINATES (for OBB):                              │
+│    8 values = 4 corner points (x1,y1), (x2,y2),         │
+│               (x3,y3), (x4,y4) → rotated box             │
+└──────────────────────────────────────────────────────────┘
+
+P3 (80×80 grid) → detects small disease spots
+P4 (40×40 grid) → detects medium disease patches
+P5 (20×20 grid) → detects large infected regions
+
+Total candidate boxes = 80×80 + 40×40 + 20×20 = 8800 boxes
+Most have very low confidence → filtered out by threshold (0.45)
+Remaining boxes → Non-Max Suppression → final clean boxes
+```
+
+**Non-Max Suppression (NMS):**
+Multiple grid cells near the same disease spot will all predict a box. NMS keeps only the best one and removes overlapping ones.
+
+```
+Before NMS:       After NMS:
+[box A 0.91]      [box A 0.91]  ← keep best
+[box B 0.88]      removed       ← overlaps A too much (IoU > 0.45)
+[box C 0.85]      removed       ← overlaps A too much
+[box D 0.72]      [box D 0.72]  ← keep (different location)
+```
+
+---
+
+### 0.10 OBB — Oriented Bounding Box Output
+
+Normal YOLO predicts: `(center_x, center_y, width, height)` — always a straight rectangle.
+
+YOLOv8 OBB predicts: 4 corner points — `(x1,y1), (x2,y2), (x3,y3), (x4,y4)` — a rotated rectangle.
+
+```
+Normal Bounding Box (AABB):        Oriented Bounding Box (OBB):
+
+ ┌──────────────────────┐                ╱────────╲
+ │  ╱╲  disease  ╱╲    │               ╱  disease ╲
+ │ ╱  ╲  patch  ╱  ╲   │              ╱  perfectly ╲
+ │╱    ╲       ╱    ╲  │             ╲   fitting    ╱
+ └──────────────────────┘              ╲           ╱
+                                        ╲─────────╱
+
+Problem: box includes a lot of         Box tightly wraps the disease.
+healthy leaf (wasted area)             Less healthy leaf included.
+Severity calculation is wrong.         Severity is accurate.
+```
+
+Disease spots on leaves are rarely perfectly horizontal. OBB allows the box to tilt and rotate to match the shape of the disease, giving a much tighter fit.
+
+---
+
+### 0.11 mAP@0.5 and mAP@0.5-0.95 Explained
+
+These are the two main numbers used to say "how accurate is our model?"
+
+Before understanding mAP, we need to know three simpler terms:
+
+**Precision:**
+```
+Out of everything the model said was a disease, how many actually were?
+
+Precision = True Positives / (True Positives + False Positives)
+
+Example: Model detected 10 boxes. 8 were real diseases. 2 were wrong.
+Precision = 8/10 = 0.80 = 80%
+```
+
+**Recall:**
+```
+Out of all the actual diseases in the photos, how many did the model find?
+
+Recall = True Positives / (True Positives + False Negatives)
+
+Example: There were 12 real disease spots total. Model found 8.
+Recall = 8/12 = 0.67 = 67%
+```
+
+**AP (Average Precision) — for one class:**
+```
+AP is the area under the Precision-Recall curve.
+
+  Precision
+  1.0 │╲
+      │  ╲
+  0.8 │   ╲___
+      │       ╲___
+  0.6 │           ╲___
+      │                ╲
+  0.0 └────────────────── Recall
+      0.0  0.2  0.4  0.6  0.8  1.0
+
+  Area under this curve = AP for that class.
+  AP = 1.0 means perfect (found every disease, no false alarms).
+```
+
+**mAP (mean Average Precision) = average AP across all classes.**
+```
+mAP = (AP_Anthracnose + AP_Wilt + AP_Deficiency + AP_Insect + AP_Healthy) / 5
+```
+
+---
+
+**mAP@0.5 — What does the @0.5 mean?**
+
+A detection is only called "correct" if the predicted box overlaps the real box with IoU ≥ 0.5 (50% overlap).
+
+```
+  Predicted box:   ┌──────────┐
+                   │          │
+  Real box:    ┌───│──────┐   │
+               │   │      │   │
+               │   └──────┼───┘
+               │          │
+               └──────────┘
+
+  Overlap area = the middle part where both boxes cover.
+  IoU = Overlap / (Combined area of both boxes)
+
+  If IoU ≥ 0.5 → this detection is CORRECT ✓
+  If IoU < 0.5 → this detection is WRONG ✗
+```
+
+So **mAP@0.5** = our model's accuracy when we only need 50% box overlap.
+This is the main metric shown in our results.
+
+---
+
+**mAP@0.5-0.95 — Stricter version:**
+
+Instead of testing at just IoU=0.5, we test at 10 different levels:
+IoU = 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95
+
+Then we average the mAP at all 10 levels.
+
+```
+mAP@0.50 = 0.91  ← easy, 50% overlap needed
+mAP@0.55 = 0.89
+mAP@0.60 = 0.85
+mAP@0.65 = 0.81
+mAP@0.70 = 0.74
+mAP@0.75 = 0.65  ← stricter
+mAP@0.80 = 0.55
+mAP@0.85 = 0.42
+mAP@0.90 = 0.31
+mAP@0.95 = 0.18  ← very strict, nearly perfect boxes needed
+
+mAP@0.5-0.95 = average of all above = 0.63
+```
+
+**In simple words:**
+- mAP@0.5 = "Did the model roughly find the disease? (box just needs to cover half)"
+- mAP@0.5-0.95 = "Did the model find it precisely? (box needs to be very tight too)"
+
+mAP@0.5-0.95 is harder to score high on because it also tests box accuracy, not just detection.
+
+---
+
+### 0.12 Training Flow — How the Model Learned
+
+```
+TRAINING LOOP (runs for N epochs, e.g., 100 rounds):
+
+┌─────────────────────────────────────────────────────────────┐
+│ STEP 1: Feed a batch of images (e.g., 16 at once)           │
+│         → Model makes predictions (boxes + labels)          │
+│                                                             │
+│ STEP 2: Compare predictions to real labels                  │
+│         → Calculate LOSS (how wrong the predictions are)    │
+│         Loss = Box loss + Class loss + Confidence loss       │
+│                                                             │
+│ STEP 3: Backpropagation                                     │
+│         → Send the error BACKWARDS through all layers       │
+│         → Compute gradient for every weight (how much did   │
+│           each weight contribute to the error?)             │
+│                                                             │
+│ STEP 4: Optimizer (Adam/SGD) updates weights                │
+│         new_weight = old_weight - (learning_rate × gradient)│
+│         → Weights shift slightly in the direction that      │
+│           reduces the error                                 │
+│                                                             │
+│ STEP 5: Repeat with next batch                              │
+│         → After all batches = 1 epoch done                  │
+│                                                             │
+│ STEP 6: After each epoch, test on validation images         │
+│         → Calculate mAP@0.5 on validation set               │
+│         → If best so far → save as best.pt                  │
+│                                                             │
+│ STEP 7: Repeat all steps for N epochs                       │
+└─────────────────────────────────────────────────────────────┘
+        │
+        ▼
+   best.pt ← the saved model with highest validation mAP
+```
+
+**What is a Learning Rate?**
+A number (e.g., 0.01) that controls how big each weight update step is.
+- Too large → model jumps around and never settles
+- Too small → model learns very slowly
+- YOLOv8 uses a **learning rate scheduler** — starts higher, gradually reduces it
+
+**What is a Loss Function?**
+It measures how wrong the model is. Three parts for YOLO:
+- **Box Loss** → how far off are the predicted box corners from the real corners?
+- **Class Loss** → did it predict the correct disease label?
+- **Confidence Loss** → was its certainty score appropriate?
+
+Training = slowly minimizing all three losses at the same time.
 
 ---
 
