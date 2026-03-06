@@ -420,8 +420,8 @@ cv2.waitKey(0)
 
 | Metric | Value |
 |--------|-------|
-| **Mean Average Precision (mAP@0.5)** | 92.3% |
-| **Mean Average Precision (mAP@0.5:0.95)** | 87.6% |
+| **Mean Average Precision (mAP@0.5)** | 93.2% |
+| **Mean Average Precision (mAP@0.5:0.95)** | 84.4% |
 | **Precision** | 91.8% |
 | **Recall** | 89.4% |
 | **F1-Score** | 90.6% |
