@@ -320,23 +320,23 @@ http://localhost:8501
 3. **View Results**: Examine the annotated image, severity metrics, and detected diseases
 4. **Download Report**: Click "Download PDF Report" for a comprehensive diagnostic document
 
-### 1. Original Site Capture
-https://github.com/user-attachments/assets/01770cc4-7c30-4b01-bacb-1cd1cddadc6d
+### 1. Site
+<img src="https://github.com/user-attachments/assets/01770cc4-7c30-4b01-bacb-1cd1cddadc6d" width="100%" />
 
 ---
 
-### 2. Standard Detection Output
-https://github.com/user-attachments/assets/c6af833d-c475-4f90-9c06-5d0baa087141
+### 2. With Standard Detection
+<img src="https://github.com/user-attachments/assets/c6af833d-c475-4f90-9c06-5d0baa087141" width="100%" />
 
 ---
 
-### 3. GradCAM Heatmap Analysis
-https://github.com/user-attachments/assets/ca92d24d-6abf-4ab7-bf0f-583ee0aa274a
+### 3. With GradCAM
+<img src="https://github.com/user-attachments/assets/ca92d24d-6abf-4ab7-bf0f-583ee0aa274a" width="100%" />
 
 ---
 
-### 4. Final Analytical Report
-https://github.com/user-attachments/assets/41d6eda8-0ef3-4a78-9a4b-c727c2d5882f
+### 4. Report
+<img src="https://github.com/user-attachments/assets/41d6eda8-0ef3-4a78-9a4b-c727c2d5882f" width="400" />
 
 
 ### Command-Line Inference (Advanced)
