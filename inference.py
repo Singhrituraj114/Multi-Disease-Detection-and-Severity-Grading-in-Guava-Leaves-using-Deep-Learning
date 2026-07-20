@@ -1,10 +1,35 @@
+import os
+import urllib.request
+
 import torch
 import cv2
 import numpy as np
 from ultralytics import YOLO
 
 # ---------------- LOAD MODEL ----------------
-model = YOLO("best.pt")
+# Locally we use the best.pt sitting next to this file. On a cloud deploy the
+# weights aren't in the git repo (they're gitignored), so we download them once
+# from MODEL_URL — e.g. a GitHub Release asset. Set MODEL_URL in the Streamlit
+# app's Secrets. The download is skipped whenever best.pt already exists.
+MODEL_PATH = os.path.join(os.path.dirname(__file__), "best.pt")
+MODEL_URL = os.environ.get("MODEL_URL", "")
+
+
+def _ensure_weights():
+    if os.path.exists(MODEL_PATH):
+        return
+    if not MODEL_URL:
+        raise FileNotFoundError(
+            "best.pt not found and MODEL_URL is not set. Set MODEL_URL "
+            "(e.g. a GitHub Release asset URL) so the weights can be downloaded."
+        )
+    tmp = MODEL_PATH + ".part"
+    urllib.request.urlretrieve(MODEL_URL, tmp)
+    os.replace(tmp, MODEL_PATH)
+
+
+_ensure_weights()
+model = YOLO(MODEL_PATH)
 
 disease_info = {
     "Anthracnose": {
@@ -58,6 +83,36 @@ model.eval()
 
 CONF_THRESH = 0.45
 
+# ---------------- LABEL MAPPING ----------------
+LABEL_MAP = {
+    "anth": "Anthracnose",
+    "anthracnose": "Anthracnose",
+    "nut_def": "Nutrient_Deficiency",
+    "nutrient_deficiency": "Nutrient_Deficiency",
+    "inse_att": "Insect_Attack",
+    "ins_att": "Insect_Attack",
+    "insect_attack": "Insect_Attack",
+    "wilt": "Wilt",
+    "healthy": "Healthy",
+}
+
+
+def canonicalize_label(raw_label: str) -> str:
+    normalized = str(raw_label).strip().lower()
+    if normalized in LABEL_MAP:
+        return LABEL_MAP[normalized]
+
+    no_sep = normalized.replace("_", "").replace(" ", "")
+    for key, value in LABEL_MAP.items():
+        if key.replace("_", "") == no_sep:
+            return value
+
+    for disease_key in disease_info:
+        if disease_key.lower() == normalized:
+            return disease_key
+
+    return str(raw_label)
+
 # ---------------- SEVERITY UTILS ----------------
 def classify(sev):
     if sev < 5:
@@ -102,7 +157,7 @@ def run_yolo(img):
                 continue
 
             pts = poly.reshape(4, 2).astype(np.int32)
-            label = results.names[int(cls)]
+            label = canonicalize_label(results.names[int(cls)])
 
             detected_diseases.add(label)
 
@@ -186,18 +241,17 @@ def run_yolo(img):
 
     return output, severity, level, list(detected_diseases), results, boxes
 
-
-# ---------------- PER-DISEASE GRAD-CAM (OPTION-A) ----------------
 def run_gradcam(img, boxes, target_layer=10):
     device = next(model.model.parameters()).device
     was_training = model.model.training
-    model.model.train()
+    model.model.eval()
 
     img_resized = cv2.resize(img, (640, 640))
-    inp = torch.from_numpy(img_resized).permute(2, 0, 1).float().unsqueeze(0).to(device)
+    inp = torch.from_numpy(img_resized).permute(2, 0, 1).float().unsqueeze(0).to(device).clone().detach()
     inp.requires_grad_(True)
 
-    activations, gradients = [], []
+    activations = []
+    gradients = []
 
     def fwd_hook(m, i, o):
         activations.append(o)
@@ -210,16 +264,10 @@ def run_gradcam(img, boxes, target_layer=10):
     h2 = layer.register_full_backward_hook(bwd_hook)
 
     try:
-        preds = model.model(inp)
+        with torch.enable_grad():
+            features = model.model.model[:target_layer + 1](inp.clone())
 
-        # ---- YOLO-safe scalar loss ----
-        if isinstance(preds, dict):
-            loss = sum(v.sum() for v in preds.values() if torch.is_tensor(v))
-        elif isinstance(preds, (list, tuple)):
-            loss = sum(p.sum() for p in preds if torch.is_tensor(p))
-        else:
-            loss = preds.sum()
-
+        loss = features.sum()
 
         model.model.zero_grad()
         loss.backward()
@@ -232,26 +280,99 @@ def run_gradcam(img, boxes, target_layer=10):
 
         cam = cam.detach().cpu().numpy()
         cam = cv2.resize(cam, (img.shape[1], img.shape[0]))
-        cam = (cam - cam.min()) / (cam.max() + 1e-8)
-        cam = (cam * 255).astype(np.uint8)
+
+        cam = np.maximum(cam, 0)
+
+        # normalize
+        cam = cam / (cam.max() + 1e-8)
+
+        # preserve multiple hotspots
+        cam = np.power(cam, 0.85)
+
+        # enhance contrast across many regions
+        cam = cv2.normalize(cam, None, 0, 1, cv2.NORM_MINMAX)
+
+        cam = np.uint8(cam * 255)
+
+        # lighter blur so separate red zones remain visible
+        cam = cv2.GaussianBlur(cam, (11, 11), 0)
 
         overlay = img.copy()
 
-        # ---------- BOX-RESTRICTED GRAD-CAM ----------
-        overlay = img.copy()
-
+        # =====================================================
+        # PASS 1 : APPLY HEATMAPS
+        # =====================================================
         for b in boxes:
+            pts = b["points"]
+
             mask = np.zeros(cam.shape, dtype=np.uint8)
-            cv2.fillPoly(mask, [b["points"]], 255)
+            cv2.fillPoly(mask, [pts], 255)
 
-            cam_norm = cv2.normalize(cam, None, 0, 255, cv2.NORM_MINMAX)
-            heat = cv2.applyColorMap(cam_norm, cv2.COLORMAP_JET)
+            heat = cv2.applyColorMap(cam, cv2.COLORMAP_JET)
             heat = cv2.bitwise_and(heat, heat, mask=mask)
-            overlay = cv2.addWeighted(overlay, 0.90, heat, 0.25, 0)
 
+            overlay = cv2.addWeighted(overlay, 0.87, heat, 0.30, 0)
+
+        # =====================================================
+        # PASS 2 : DRAW GREEN BOXES
+        # =====================================================
+        for b in boxes:
+            pts = b["points"]
+            cv2.polylines(overlay, [pts], True, (0, 255, 0), 2)
+
+        # =====================================================
+        # PASS 3 : DRAW LABELS LAST (SHARP)
+        # =====================================================
+        for b in boxes:
+            pts = b["points"]
+            label = b["label"]
+            conf = b["conf"]
+
+            cx = int(pts[:, 0].mean())
+            cy = int(pts[:, 1].mean())
+
+            short = label.replace("Nutrient_Deficiency", "Nutrient")
+            short = short.replace("Insect_Attack", "Insect")
+
+            text = f"{short} {conf:.2f}"
+
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 0.55
+            thickness = 2
+
+            (tw, th), _ = cv2.getTextSize(text, font, font_scale, thickness)
+
+            x1 = cx - tw // 2 - 4
+            y1 = cy - th - 6
+            x2 = cx + tw // 2 + 4
+            y2 = cy
+
+            h_img, w_img = overlay.shape[:2]
+
+            x1 = max(0, x1)
+            y1 = max(th + 4, y1)
+            x2 = min(w_img, x2)
+
+            cv2.rectangle(
+                overlay,
+                (x1, y1),
+                (x2, y2),
+                (0, 0, 0),
+                -1
+            )
+
+            cv2.putText(
+                overlay,
+                text,
+                (x1 + 4, y2 - 3),
+                font,
+                font_scale,
+                (255, 255, 255),
+                thickness,
+                cv2.LINE_AA
+            )
 
         return overlay
-
 
     finally:
         h1.remove()
