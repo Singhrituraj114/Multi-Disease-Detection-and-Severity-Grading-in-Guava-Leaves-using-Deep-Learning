@@ -19,3 +19,6 @@ Thumbs.db
 
 # Gradio cache
 .gradio/
+
+# Local run logs
+streamlit_run.log
